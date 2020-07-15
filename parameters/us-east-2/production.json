@@ -1,0 +1,54 @@
+[
+    { 
+        "ParameterKey" : "Region",
+        "ParameterValue" :"us-east-2"
+    },
+    { 
+        "ParameterKey" : "Environment",
+        "ParameterValue" :"production"
+    },
+    { 
+        "ParameterKey" : "VPCCidr",
+        "ParameterValue" :"10.0.0.0/16"
+    },
+    { 
+        "ParameterKey" : "FlowLogsLogDestinationType",
+        "ParameterValue" :""
+    },
+    { 
+        "ParameterKey" : "DBName",
+        "ParameterValue" :"ProductionDB"
+    },
+    { 
+        "ParameterKey" : "DBUsername",
+        "ParameterValue" :"postgres"
+    },
+    { 
+        "ParameterKey" : "DBInstanceClass",
+        "ParameterValue" :"db.t3.medium"
+    },
+    { 
+        "ParameterKey" : "ParentVPCStack",
+        "ParameterValue" :"vpc"
+    },
+    { 
+        "ParameterKey" : "ServiceOwnersEmailContact",
+        "ParameterValue" :"anton.schnetler@itooc.com.au"
+    },
+    { 
+        "ParameterKey" : "Compliance",
+        "ParameterValue" :"none"
+    },
+    { 
+        "ParameterKey" : "NotificationList",
+        "ParameterValue" :"anton.schnetler@itoc.com.au"
+    },
+    { 
+        "ParameterKey" : "Confidentiality",
+        "ParameterValue" :"private"
+    },
+    { 
+        "ParameterKey" : "Application",
+        "ParameterValue" :"comestri"
+    }
+]

@@ -1,0 +1,1135 @@
+---
+#====================================================================================================
+# Description : Create the Shared Services VPC in the account
+#====================================================================================================
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS VPC - Shared Services - 3-tier, 3-AZ'
+#====================================================================================================
+#                                             Parameters
+#====================================================================================================
+Parameters:
+  Environment:
+    Description: Which environment the resources will be deployed in (e.g. shared)
+    Type: String
+    Default: 'shared'
+  Region:
+    Description: Which region the resources will be deployed in (e.g. shared)
+    Type: String
+    Default: 'us-east-2'
+  VPCCidr:
+    Description: VPC Network CIDR
+    Type: String
+  VPCSubnetMask:
+    Description: VPC subnet mask bits (12 is /20 for a /16 VPC. 8 is /24 for a /20 VPC) 
+    Type: Number
+    Default: 12
+  VPCSecureNACLMask:
+    Description: VPC secure subnets NACL mask bits (14 is /18 for a /16 VPC, 10 is /22 for a /20 VPC) 
+    Type: Number
+    Default: 14
+  #--------------------------------------------------------------------------------------------------
+  NumberOfNatGateways:
+    Description: How many NAT Gateways should be configured
+    Type: String
+    Default: '0'
+    AllowedValues:
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+  #--------------------------------------------------------------------------------------------------
+  FlowLogsS3Bucket:
+    Description: Bucket name for Flow Logs
+    Default: "flow-logs"
+    Type: String
+  FlowLogsLogDestinationType:
+    Description: Flow Log Type
+    Type: String
+    Default: s3
+  #--------------------------------------------------------------------------------------------------
+  CreateVPG:
+    Description: Create a VPG
+    Type: String
+    Default: false
+    AllowedValues: [true,false]
+  CreateS3Gateway:
+    Description: Create a S3 Gateway
+    Type: String
+    Default: true
+    AllowedValues: [true,false]
+  CreateDynamoGateway:
+    Description: Create a DynamoDB Gateway
+    Type: String
+    Default: true
+    AllowedValues: [true,false]
+#====================================================================================================
+#                                             Conditions
+#====================================================================================================
+Conditions:
+  IsNatAEnabled: !Or [ 
+    !Equals [!Ref NumberOfNatGateways, '1'],  
+    !Equals [!Ref NumberOfNatGateways, '2'], 
+    !Equals [!Ref NumberOfNatGateways, '3']
+  ]
+  IsNatBEnabled: !Or [ 
+    !Equals [!Ref NumberOfNatGateways, '2'], 
+    !Equals [!Ref NumberOfNatGateways, '3']
+  ]
+  IsNatCEnabled: !Equals [!Ref NumberOfNatGateways, '3' ]
+  
+  IsNatARouteableFromB: !And [ 
+      Condition: IsNatAEnabled,
+      !Not [ Condition: IsNatBEnabled ]
+    ]
+  IsNatARouteableFromC: !And [ 
+      Condition: IsNatAEnabled,
+      !Not [ Condition: IsNatCEnabled ]
+    ]
+  EnableFlowLogs: !Not [ !Equals [ !Ref FlowLogsLogDestinationType, '' ] ]
+  EnableVPG: !Equals [!Ref CreateVPG, 'true']
+  EnableS3Gateway: !Equals [!Ref CreateS3Gateway, 'true']
+  EnableDynamoGateway: !Equals [!Ref CreateDynamoGateway, 'true']
+#====================================================================================================
+#                                             Resources
+#====================================================================================================
+Resources:
+#====================================================================================================
+#                                             VPC
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  VPC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Sub "${VPCCidr}"
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-vpc"
+
+#====================================================================================================
+#                                             Public NACL
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicNACL:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-nacl"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyFromPublic:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: 'true'
+      NetworkAclId:
+        Ref: PublicNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyToPublic:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: PublicNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+
+#====================================================================================================
+#                                             Private NACL
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateNACL:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-nacl"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyFromPrivate:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: 'true'
+      NetworkAclId:
+        Ref: PrivateNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyToPrivate:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: PrivateNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+
+#====================================================================================================
+#                                             Secure NACL
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureNACL:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-nacl"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  DenyAnyFromPublic:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: !Select [ 0, !Cidr [ !Sub "${VPCCidr}", 1, !Sub "${VPCSecureNACLMask}" ]]
+      Egress: 'true'
+      NetworkAclId:
+        Ref: SecureNACL
+      Protocol: '-1'
+      RuleAction: deny
+      RuleNumber: '100'
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyFromSecure:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: 'true'
+      NetworkAclId:
+        Ref: SecureNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '110'
+
+  #--------------------------------------------------------------------------------------------------
+  DenyAnyToSecure:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: !Select [ 0, !Cidr [ !Sub "${VPCCidr}", 1, !Sub "${VPCSecureNACLMask}" ]]
+      NetworkAclId:
+        Ref: SecureNACL
+      Protocol: '-1'
+      RuleAction: deny
+      RuleNumber: '100'
+
+  #--------------------------------------------------------------------------------------------------
+  PermitAnyToSecure:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: SecureNACL
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '110'
+
+#====================================================================================================
+#                                             Public Subnet A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 0, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-sn-a"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetANACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PublicNACL
+      SubnetId:
+        Ref: PublicSubnetA
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetARouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTableA
+      SubnetId:
+        Ref: PublicSubnetA
+
+#====================================================================================================
+#                                             Public Subnet B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 1, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-sn-b"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetBNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PublicNACL
+      SubnetId:
+        Ref: PublicSubnetB
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetBRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTableB
+      SubnetId:
+        Ref: PublicSubnetB
+
+#====================================================================================================
+#                                             Public Subnet C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 2, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-sn-c"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetCNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PublicNACL
+      SubnetId:
+        Ref: PublicSubnetC
+
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetCRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTableC
+      SubnetId:
+        Ref: PublicSubnetC
+
+#====================================================================================================
+#                                             Private Subnet A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 4, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-sn-a"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetANACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PrivateNACL
+      SubnetId:
+        Ref: PrivateSubnetA
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetARouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableA
+      SubnetId:
+        Ref: PrivateSubnetA
+
+#====================================================================================================
+#                                             Private Subnet B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 5, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-sn-b"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetBNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PrivateNACL
+      SubnetId:
+        Ref: PrivateSubnetB
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetBRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableB
+      SubnetId:
+        Ref: PrivateSubnetB
+
+#====================================================================================================
+#                                             Private Subnet C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 6, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-sn-c"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetCNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: PrivateNACL
+      SubnetId:
+        Ref: PrivateSubnetC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetCRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableC
+      SubnetId:
+        Ref: PrivateSubnetC
+
+#====================================================================================================
+#                                             Secure Subnet A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 8, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-sn-a"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetANACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: SecureNACL
+      SubnetId:
+        Ref: SecureSubnetA
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetARouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: SecureRouteTableA
+      SubnetId:
+        Ref: SecureSubnetA
+
+#====================================================================================================
+#                                             Secure Subnet B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 9, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-sn-b"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetBNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: SecureNACL
+      SubnetId:
+        Ref: SecureSubnetB
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetBRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: SecureRouteTableB
+      SubnetId:
+        Ref: SecureSubnetB
+
+#====================================================================================================
+#                                             Secure Subnet C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Select [ 10, !Cidr [ !Sub "${VPCCidr}", 12, !Sub "${VPCSubnetMask}" ]]
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-sn-c"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetCNACLAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: SecureNACL
+      SubnetId:
+        Ref: SecureSubnetC
+
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetCRouteTableAssociation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: SecureRouteTableC
+      SubnetId:
+        Ref: SecureSubnetC
+
+#====================================================================================================
+#                                             Internet Gateway
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  InternetGateway:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-igw"
+
+  #--------------------------------------------------------------------------------------------------
+  AttachGateway:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             NAT Gateway A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayEIPA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::EIP
+    Condition: IsNatAEnabled
+    DependsOn: VPC
+    Properties:
+      Domain: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NatGateway
+    Condition: IsNatAEnabled
+    DependsOn:
+      - NATGatewayEIPA
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-nat-a"
+      AllocationId: !Sub '${NATGatewayEIPA.AllocationId}'
+      SubnetId: !Ref PublicSubnetA
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateDefaultRouteA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    Condition: IsNatAEnabled
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref PrivateRouteTableA
+
+#====================================================================================================
+#                                             NAT Gateway B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayEIPB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::EIP
+    Condition: IsNatBEnabled
+    DependsOn: VPC
+    Properties:
+      Domain: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NatGateway
+    Condition: IsNatBEnabled
+    DependsOn:
+      - NATGatewayEIPB
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-nat-b"
+      AllocationId: !Sub '${NATGatewayEIPB.AllocationId}'
+      SubnetId: !Ref PublicSubnetB
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateDefaultRouteB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    Condition: IsNatBEnabled
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateDefaultRouteBAlt:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    Condition: IsNatARouteableFromB
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref PrivateRouteTableB
+
+#====================================================================================================
+#                                             NAT Gateway C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayEIPC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::EIP
+    Condition: IsNatCEnabled
+    DependsOn: VPC
+    Properties:
+      Domain: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  NATGatewayC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::NatGateway
+    Condition: IsNatCEnabled
+    DependsOn:
+      - NATGatewayEIPC
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-nat-c"
+      AllocationId: !Sub '${NATGatewayEIPC.AllocationId}'
+      SubnetId: !Ref PublicSubnetC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateDefaultRouteC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    Condition: IsNatCEnabled
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayC
+      RouteTableId: !Ref PrivateRouteTableC
+
+  #--------------------------------------------------------------------------------------------------
+  PrivateDefaultRouteCAlt:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    Condition: IsNatARouteableFromC
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref PrivateRouteTableC
+
+#====================================================================================================
+#                                             Public Route Table A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicRouteTableA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-rt-a"
+      VpcId:
+        Ref: VPC
+
+  #--------------------------------------------------------------------------------------------------
+  PublicDefaultRouteA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PublicRouteTableA
+
+#====================================================================================================
+#                                             Public Route Table B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicRouteTableB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-rt-b"
+      VpcId:
+        Ref: VPC
+    
+  #--------------------------------------------------------------------------------------------------
+  PublicDefaultRouteB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PublicRouteTableB
+
+#====================================================================================================
+#                                             Public Route Table C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PublicRouteTableC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-public-rt-c"
+      VpcId:
+        Ref: VPC
+    
+  #--------------------------------------------------------------------------------------------------
+  PublicDefaultRouteC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PublicRouteTableC
+
+#====================================================================================================
+#                                             Private Route Table A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateRouteTableA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-rt-a"
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             Private Route Table B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateRouteTableB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-rt-b"
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             Private Route Table C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  PrivateRouteTableC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-private-rt-c"
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             Secure Route Table A
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureRouteTableA:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-rt-a"
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             Secure Route Table B
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureRouteTableB:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-rt-b"
+      VpcId:
+        Ref: VPC
+
+#====================================================================================================
+#                                             Secure Route Table C
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  SecureRouteTableC:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Environment}-secure-rt-c"
+      VpcId:
+        Ref: VPC
+        
+#====================================================================================================
+#                                             Flow Logs
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  FlowLog:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::FlowLog
+    Condition: EnableFlowLogs
+    Properties:
+      LogDestination: !Sub "arn:aws:s3:::${FlowLogsS3Bucket}/"
+      LogDestinationType: !Ref FlowLogsLogDestinationType
+      ResourceId: !Ref VPC
+      ResourceType: VPC
+      TrafficType: ALL
+
+#====================================================================================================
+#                                       Virtual Private Gateway
+#====================================================================================================
+  #--------------------------------------------------------------------------------------------------
+  VPG:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPNGateway
+    Condition: EnableVPG
+    Properties: 
+      Type: ipsec.1
+  
+  #--------------------------------------------------------------------------------------------------
+  VPGAttachment:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: EnableVPG
+    Properties: 
+      VpcId: !Ref VPC
+      VpnGatewayId: !Ref VPG
+  #--------------------------------------------------------------------------------------------------
+  VPGRoutePropogation:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPNGatewayRoutePropagation
+    Condition: EnableVPG
+    Properties: 
+      RouteTableIds: 
+        - !Ref PublicRouteTableA
+        - !Ref PublicRouteTableB
+        - !Ref PublicRouteTableC
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+        - !Ref PrivateRouteTableC
+        - !Ref SecureRouteTableA
+        - !Ref SecureRouteTableB
+        - !Ref SecureRouteTableC
+      VpnGatewayId: !Ref VPG
+
+#====================================================================================================
+#                                       VPC Gateways
+#====================================================================================================
+    
+  #--------------------------------------------------------------------------------------------------
+  S3Gateway:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPCEndpoint
+    Condition: EnableS3Gateway
+    Properties: 
+      RouteTableIds: 
+        - !Ref PublicRouteTableA
+        - !Ref PublicRouteTableB
+        - !Ref PublicRouteTableC
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+        - !Ref PrivateRouteTableC
+        - !Ref SecureRouteTableA
+        - !Ref SecureRouteTableB
+        - !Ref SecureRouteTableC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+  #--------------------------------------------------------------------------------------------------
+  DynamoGateway:
+  #--------------------------------------------------------------------------------------------------
+    Type: AWS::EC2::VPCEndpoint
+    Condition: EnableDynamoGateway
+    Properties: 
+      RouteTableIds: 
+        - !Ref PublicRouteTableA
+        - !Ref PublicRouteTableB
+        - !Ref PublicRouteTableC
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+        - !Ref PrivateRouteTableC
+        - !Ref SecureRouteTableA
+        - !Ref SecureRouteTableB
+        - !Ref SecureRouteTableC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+
+#====================================================================================================
+#                                             Outputs
+#====================================================================================================
+Outputs:
+
+#====================================================================================================
+#                                             Standard Outputs
+#====================================================================================================
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${Environment}-vpc-id'
+  VpcRegion:
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${Environment}-vpc-region'
+  VpcCidrBlock:
+    Value: !Sub '${VPCCidr}'
+    Export:
+      Name: !Sub '${Environment}-vpc-cidr-block'
+  #--------------------------------------------------------------------------------------------------
+  PublicSubnetA:
+    Value:
+      Ref: PublicSubnetA
+    Export:
+      Name: !Sub '${Environment}-public-sn-a'
+  PublicSubnetB:
+    Value:
+      Ref: PublicSubnetB
+    Export:
+      Name: !Sub '${Environment}-public-sn-b'
+  PublicSubnetC:
+    Value:
+      Ref: PublicSubnetC
+    Export:
+      Name: !Sub '${Environment}-public-sn-c'
+  #--------------------------------------------------------------------------------------------------
+  PrivateSubnetA:
+    Value:
+      Ref: PrivateSubnetA
+    Export:
+      Name: !Sub '${Environment}-private-sn-a'
+  PrivateSubnetB:
+    Value:
+      Ref: PrivateSubnetB
+    Export:
+      Name: !Sub '${Environment}-private-sn-b'
+  PrivateSubnetC:
+    Value:
+      Ref: PrivateSubnetC
+    Export:
+      Name: !Sub '${Environment}-private-sn-c'
+  #--------------------------------------------------------------------------------------------------
+  SecureSubnetA:
+    Value:
+      Ref: SecureSubnetA
+    Export:
+      Name: !Sub '${Environment}-secure-sn-a'
+  SecureSubnetB:
+    Value:
+      Ref: SecureSubnetB
+    Export:
+      Name: !Sub '${Environment}-secure-sn-b'
+  SecureSubnetC:
+    Value:
+      Ref: SecureSubnetC
+    Export:
+      Name: !Sub '${Environment}-secure-sn-c'
+  #--------------------------------------------------------------------------------------------------
+  PublicRouteTableA:
+    Value:
+      Ref: PublicRouteTableA
+    Export:
+      Name: !Sub '${Environment}-public-rt-a'
+  PublicRouteTableB:
+    Value:
+      Ref: PublicRouteTableB
+    Export:
+      Name: !Sub '${Environment}-public-rt-b'
+  PublicRouteTableC:
+    Value:
+      Ref: PublicRouteTableC
+    Export:
+      Name: !Sub '${Environment}-public-rt-c'
+  #--------------------------------------------------------------------------------------------------
+  PrivateRouteTableA:
+    Value:
+      Ref: PrivateRouteTableA
+    Export:
+      Name: !Sub '${Environment}-private-rt-a'
+  PrivateRouteTableB:
+    Value:
+      Ref: PrivateRouteTableB
+    Export:
+      Name: !Sub '${Environment}-private-rt-b'
+  PrivateRouteTableC:
+    Value:
+      Ref: PrivateRouteTableC
+    Export:
+      Name: !Sub '${Environment}-private-rt-c'
+  #--------------------------------------------------------------------------------------------------
+  SecureRouteTableA:
+    Value:
+      Ref: SecureRouteTableA
+    Export:
+      Name: !Sub '${Environment}-secure-rt-a'
+  SecureRouteTableB:
+    Value:
+      Ref: SecureRouteTableB
+    Export:
+      Name: !Sub '${Environment}-secure-rt-b'
+  SecureRouteTableC:
+    Value:
+      Ref: SecureRouteTableC
+    Export:
+      Name: !Sub '${Environment}-secure-rt-c'
